@@ -1,0 +1,133 @@
+#version 430 core
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Compute Shader — Shape Noise 3D (128³)
+//
+//  Gera uma textura RGBA32F onde:
+//    R = Perlin-Worley noise  (baixa freq. — estrutura base)
+//    G = Worley F1 octave 1   (média freq.)
+//    B = Worley F1 octave 2   (alta freq.)
+//    A = Worley F1 octave 3   (muito alta freq.)
+//
+//  Combinação: density = remap(R, -(G*B*A), 1, 0, 1)
+//  Produz as formas "cauliflower" características das nuvens cumulonimbus.
+//
+//  Referência: Andrew Schneider, "The Real-time Volumetric Cloudscapes of
+//  Horizon: Zero Dawn", SIGGRAPH 2015.
+// ─────────────────────────────────────────────────────────────────────────────
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(rgba32f, binding = 0) uniform image3D uOutputTex;
+
+// ── Hash / Ruído base ──────────────────────────────────────────────────────
+
+// Hash 3D → float pseudo-aleatório [0,1]
+float hash(vec3 p)
+{
+    p  = fract(p * vec3(443.8975, 397.2973, 491.1871));
+    p += dot(p.zxy, p.yxz + 19.19);
+    return fract(p.x * p.y * p.z);
+}
+
+// ── Worley Noise ──────────────────────────────────────────────────────────────
+//
+//  Worley noise divide o espaço em células. Para cada ponto calcula a
+//  distância ao ponto de feature mais próximo dentro da célula vizinha.
+//  Resultado: padrão de "bolhas" que se assemelha à estrutura interior das nuvens.
+
+float worley(vec3 p, float freq)
+{
+    p *= freq;
+    vec3 id   = floor(p);
+    vec3 fd   = fract(p);
+
+    float minDist = 1.0;
+    // Itera as 27 células vizinhas (3x3x3)
+    for (int x = -1; x <= 1; x++)
+    for (int y = -1; y <= 1; y++)
+    for (int z = -1; z <= 1; z++)
+    {
+        vec3 neighbor = vec3(x, y, z);
+        vec3 point    = hash(mod(id + neighbor, freq)) * vec3(1.0);
+        // Ponto de feature numa posição aleatória dentro da célula
+        point = neighbor + vec3(
+            hash(mod(id + neighbor, freq)),
+            hash(mod(id + neighbor + 17.3, freq)),
+            hash(mod(id + neighbor + 31.7, freq))
+        );
+        float d = length(fd - point);
+        minDist = min(minDist, d);
+    }
+    return minDist;
+}
+
+// ── Perlin noise (gradient noise) ─────────────────────────────────────────────
+
+vec3 grad(vec3 i)
+{
+    // Gradiente pseudo-aleatório num vértice da grelha
+    float h = fract(sin(dot(i, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float a = h * 6.2832;
+    float b = h * 3.1416;
+    return vec3(cos(a)*sin(b), sin(a)*sin(b), cos(b));
+}
+
+float perlin(vec3 p)
+{
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    // Suavização cúbica (C2)
+    vec3 u = f*f*f*(f*(f*6.0 - 15.0) + 10.0);
+
+    float v000 = dot(grad(i + vec3(0,0,0)), f - vec3(0,0,0));
+    float v100 = dot(grad(i + vec3(1,0,0)), f - vec3(1,0,0));
+    float v010 = dot(grad(i + vec3(0,1,0)), f - vec3(0,1,0));
+    float v110 = dot(grad(i + vec3(1,1,0)), f - vec3(1,1,0));
+    float v001 = dot(grad(i + vec3(0,0,1)), f - vec3(0,0,1));
+    float v101 = dot(grad(i + vec3(1,0,1)), f - vec3(1,0,1));
+    float v011 = dot(grad(i + vec3(0,1,1)), f - vec3(0,1,1));
+    float v111 = dot(grad(i + vec3(1,1,1)), f - vec3(1,1,1));
+
+    return mix(
+        mix(mix(v000, v100, u.x), mix(v010, v110, u.x), u.y),
+        mix(mix(v001, v101, u.x), mix(v011, v111, u.x), u.y),
+        u.z
+    ) * 0.5 + 0.5; // remapear para [0,1]
+}
+
+// Perlin-Worley: inverte Worley e combina com Perlin para forma de nuvem
+float perlinWorley(vec3 p, float freq)
+{
+    float pw = perlin(p * freq * 0.5) * 0.5
+             + perlin(p * freq * 1.0) * 0.35
+             + perlin(p * freq * 2.0) * 0.15;
+    float wn = worley(p, freq);
+    // Rebalancear: Perlin dá estrutura, Worley dá "esponjoso"
+    return mix(pw, 1.0 - wn, 0.5);
+}
+
+// ── remap ──────────────────────────────────────────────────────────────────────
+float remap(float v, float lo, float hi, float newLo, float newHi)
+{
+    return newLo + (v - lo) / (hi - lo) * (newHi - newLo);
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+
+void main()
+{
+    ivec3 coord  = ivec3(gl_GlobalInvocationID);
+    ivec3 size   = imageSize(uOutputTex);
+    vec3  uv     = (vec3(coord) + 0.5) / vec3(size); // [0,1]³
+
+    // Canal R: Perlin-Worley (forma base, baixa frequência)
+    float pw = perlinWorley(uv, 4.0);
+
+    // Canais G,B,A: Worley em frequências crescentes
+    float w1 = 1.0 - worley(uv, 4.0);
+    float w2 = 1.0 - worley(uv, 8.0);
+    float w3 = 1.0 - worley(uv, 16.0);
+
+    imageStore(uOutputTex, coord, vec4(pw, w1, w2, w3));
+}

@@ -1,0 +1,63 @@
+#version 430 core
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Compute Shader — Detail Noise 3D (32³)
+//
+//  Gera uma textura RGBA32F com Worley noise em 3 frequências.
+//  Usada para erodir/detalhar as bordas das nuvens.
+//
+//    R = Worley F1 (baixa freq.)
+//    G = Worley F1 (média freq.)
+//    B = Worley F1 (alta freq.)
+//    A = não usado
+// ─────────────────────────────────────────────────────────────────────────────
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(rgba32f, binding = 0) uniform image3D uOutputTex;
+
+float hash(vec3 p)
+{
+    p  = fract(p * vec3(443.8975, 397.2973, 491.1871));
+    p += dot(p.zxy, p.yxz + 19.19);
+    return fract(p.x * p.y * p.z);
+}
+
+float worley(vec3 p, float freq)
+{
+    p *= freq;
+    vec3 id = floor(p);
+    vec3 fd = fract(p);
+
+    float minDist = 1.0;
+    for (int x = -1; x <= 1; x++)
+    for (int y = -1; y <= 1; y++)
+    for (int z = -1; z <= 1; z++)
+    {
+        vec3 neighbor = vec3(x, y, z);
+        vec3 point = neighbor + vec3(
+            hash(mod(id + neighbor,           freq)),
+            hash(mod(id + neighbor + 17.3,    freq)),
+            hash(mod(id + neighbor + 31.7,    freq))
+        );
+        minDist = min(minDist, length(fd - point));
+    }
+    // Inverte: 0=longe do centro, 1=centro da célula
+    return 1.0 - minDist;
+}
+
+void main()
+{
+    ivec3 coord = ivec3(gl_GlobalInvocationID);
+    ivec3 size  = imageSize(uOutputTex);
+    vec3  uv    = (vec3(coord) + 0.5) / vec3(size);
+
+    float w1 = worley(uv, 2.0);
+    float w2 = worley(uv, 4.0);
+    float w3 = worley(uv, 8.0);
+
+    // FBM do detail: combina em diferentes amplitudes
+    float detail = w1 * 0.5 + w2 * 0.3 + w3 * 0.2;
+
+    imageStore(uOutputTex, coord, vec4(w1, w2, w3, detail));
+}

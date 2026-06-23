@@ -1,293 +1,248 @@
 #version 430 core
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  clouds.frag  — Ray marching de nuvens volum╔tricas
-//
-//  ALGORITMO PRINCIPAL:
-//
-//  Para cada pixel, lança um raio da câmara para o espaço.
-//  O raio intersecta a camada de nuvens (entre uCloudBottom e uCloudTop).
-//  Ao longo do raio, amostra a densidade da nuvem a cada passo.
-//  Para cada amostra com densidade > 0, lança um raio secundário na direcção
-//  do sol para calcular a auto-sombra (light march).
-//
-//  FÍSICA IMPLEMENTADA:
-//
-//  1. Beer-Lambert Law: transmittance = exp(-density * absorption * stepSize)
-//     Modela como a luz se atenua ao atravessar um meio participativo.
-//
-//  2. Henyey-Greenstein Phase Function:
-//     p(θ) = (1 - g²) / (4π * (1 + g² - 2g*cosθ)^(3/2))
-//     Modela o scattering anisotrópico: nuvens iluminadas pelo sol de trás
-//     ficam com um halo brilhante (forward scattering, g > 0).
-//
-//  3. Powder Effect (dark edges):
-//     Simula multiple scattering de forma económica — o topo das nuvens
-//     é mais escuro porque a luz tem de atravessar mais material.
-//     powder = 1 - exp(-density * 2 * stepSize)
-//
-//  Referências:
-//    - A. Schneider, "The Real-time Volumetric Cloudscapes of Horizon: Zero
-//      Dawn", SIGGRAPH 2015.
-//    - S. Hillaire, "A Scalable and Production Ready Sky and Atmosphere
-//      Rendering Technique", EGSR 2020.
-// ═════════════════════════════════════════════════════════════════════════════
-
 in vec2 vUV;
 
-// Output: dois color attachments
-layout(location = 0) out vec4 oCloudColor;       // RGB = cor acumulada, A = não usado
-layout(location = 1) out float oTransmittance;   // transmittância final [0=opaco, 1=vazio]
+layout(location = 0) out vec4 oCloudColor;
+layout(location = 1) out float oTransmittance;
 
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
-// Reconstrução de raios
 uniform mat4  uInvView;
 uniform mat4  uInvProj;
 uniform vec3  uCameraPos;
 uniform float uTime;
 uniform vec2  uResolution;
 
-// Noise textures
-uniform sampler3D uShapeNoise;   // 128³ RGBA — Perlin-Worley + Worley
-uniform sampler3D uDetailNoise;  // 32³  RGBA — Worley detail
+uniform sampler3D uShapeNoise;
+uniform sampler3D uDetailNoise;
 
-// Parâmetros de nuvem
-uniform float uCloudBottom;        // altitude base da camada (m)
-uniform float uCloudTop;           // altitude topo da camada (m)
-uniform float uCoverage;           // cobertura global [0,1]
-uniform float uDensity;            // multiplicador de densidade
-uniform float uShapeScale;         // frequência do shape noise
-uniform float uDetailScale;        // frequência do detail noise
-uniform float uDetailStrength;     // quanto o detail erode a forma base
+// Textura do frame anterior para acumulação temporal
+uniform sampler2D uPrevCloudColor;
+uniform sampler2D uPrevCloudAlpha;
+uniform float     uTemporalBlend;   // 0=só história, 1=só frame atual
+uniform int       uFrameIndex;
 
-// Vento
+uniform float uCloudBottom;
+uniform float uCloudTop;
+uniform float uCoverage;
+uniform float uDensity;
+uniform float uShapeScale;
+uniform float uDetailScale;
+uniform float uDetailStrength;
+
 uniform vec3  uWindDir;
 uniform float uWindSpeed;
 
-// Iluminação
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform float uSunIntensity;
-uniform float uLightAbsorption;    // coeficiente de absorção para raio de luz
-uniform float uCloudAbsorption;    // coeficiente de absorção para raio de câmara
-uniform float uDarkEdgeFactor;     // intensidade do efeito powder/dark-edge
+uniform float uLightAbsorption;
+uniform float uCloudAbsorption;
+uniform float uDarkEdgeFactor;
 
-// Henyey-Greenstein
-uniform float uHGForward;          // g ∈ [0, 1)  — lóbulo forward
-uniform float uHGBackward;         // g ∈ (-1, 0] — lóbulo backward
-uniform float uHGBlend;            // [0,1] mistura entre lóbulos
+uniform float uHGForward;
+uniform float uHGBackward;
+uniform float uHGBlend;
 
-// Ray march
 uniform int   uPrimarySteps;
 uniform int   uLightSteps;
 uniform float uMaxRayDist;
 
-// Céu
 uniform vec3 uSkyZenith;
 uniform vec3 uSkyHorizon;
 
-// ── Funções auxiliares ────────────────────────────────────────────────────────
+// ── Funções base ──────────────────────────────────────────────────────────────
 
-// Remap: remapeia v do intervalo [lo,hi] para [newLo, newHi]
-// Usa mix() para que funcione mesmo quando newLo > newHi (ex: fade invertido)
 float remap(float v, float lo, float hi, float newLo, float newHi)
 {
     float t = clamp((v - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
     return mix(newLo, newHi, t);
 }
 
-// Henyey-Greenstein phase function
-// θ = ângulo entre raio de câmara e direcção da luz
-// g ∈ (-1, 1): g>0 = forward scattering, g<0 = backward scattering
 float henyeyGreenstein(float cosTheta, float g)
 {
-    float g2 = g * g;
-    return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+    float g2 = g*g;
+    return (1.0 - g2) / (4.0*3.14159265 * pow(max(1.0 + g2 - 2.0*g*cosTheta, 0.001), 1.5));
 }
 
-// Phase function combinada (dois lóbulos)
+// Função de fase dupla (silver lining + back-scattering)
 float phaseFunction(float cosTheta)
 {
-    float pfForward  = henyeyGreenstein(cosTheta,  uHGForward);
-    float pfBackward = henyeyGreenstein(cosTheta,  uHGBackward);
-    return mix(pfForward, pfBackward, uHGBlend);
+    float pf  = henyeyGreenstein(cosTheta,  uHGForward);
+    float pb  = henyeyGreenstein(cosTheta,  uHGBackward);
+    return mix(pf, pb, uHGBlend);
 }
 
-// ── Interseção raio-plano horizontal ─────────────────────────────────────────
+// Interleaved Gradient Noise — muito menos artefactos que ruído branco
+float ign(vec2 pos)
+{
+    return fract(52.9829189 * fract(dot(pos, vec2(0.06711056, 0.00583715))));
+}
 
-// Retorna a distância ao plano y=altitude; -1 se não intersecta na direcção positiva
 float rayPlane(vec3 ro, vec3 rd, float altitude)
 {
-    if (abs(rd.y) < 1e-6) return -1.0;
+    if (abs(rd.y) < 1e-5) return -1.0;
     float t = (altitude - ro.y) / rd.y;
     return t;
 }
 
 // ── Densidade das nuvens ──────────────────────────────────────────────────────
-//
-//  Amostrar as texturas 3D de ruído e construir o valor de densidade
-//  para o ponto p (coordenada 3D no mundo).
 
 float sampleCloudDensity(vec3 p)
 {
     vec3 windOffset = uWindDir * uWindSpeed * uTime;
 
     float normAlt = remap(p.y, uCloudBottom, uCloudTop, 0.0, 1.0);
-    float heightGrad = normAlt * remap(normAlt, 0.07, 0.14, 0.0, 1.0)
-                     * remap(normAlt, 0.85, 1.0, 1.0, 0.0);
+
+    // Perfil de altitude: sobe suavemente na base, decresce no topo
+    float baseGrad = remap(normAlt, 0.0,  0.15, 0.0, 1.0);
+    float topGrad  = remap(normAlt, 0.85, 1.0,  1.0, 0.0);
+    float heightGrad = baseGrad * topGrad;
     heightGrad = clamp(heightGrad, 0.0, 1.0);
     if (heightGrad <= 0.0) return 0.0;
 
-    vec3 samplePos = p * uShapeScale + windOffset * uShapeScale;
-    vec4 shape = texture(uShapeNoise, samplePos);
-    float shapeFBM = shape.r * 0.625 + shape.g * 0.250 + shape.b * 0.125;
+    // Shape noise (Perlin-Worley) — 4 canais para FBM
+    vec3 sp = p * uShapeScale + windOffset * uShapeScale;
+    vec4 shape = texture(uShapeNoise, sp);
+    float shapeFBM = shape.r*0.625 + shape.g*0.250 + shape.b*0.100 + shape.a*0.025;
 
+    // Cobertura: remap para que valores > (1-coverage) produzam nuvens
     float cloudShape = remap(shapeFBM, 1.0 - uCoverage, 1.0, 0.0, 1.0);
     cloudShape *= heightGrad;
     if (cloudShape <= 0.0) return 0.0;
 
-    vec3 detailSamplePos = p * uDetailScale + windOffset * uDetailScale * 0.5;
-    vec4 detail = texture(uDetailNoise, detailSamplePos);
-    float detailFBM = detail.r * 0.625 + detail.g * 0.250 + detail.b * 0.125;
+    // Detail noise: erosão nas bordas
+    vec3 dp = p * uDetailScale + windOffset * uDetailScale * 0.4;
+    vec4 detail = texture(uDetailNoise, dp);
+    float detailFBM = detail.r*0.625 + detail.g*0.250 + detail.b*0.125;
 
-    float detailMod = mix(detailFBM, 1.0 - detailFBM, clamp(normAlt * 10.0, 0.0, 1.0));
-    float finalDensity = remap(cloudShape, detailMod * uDetailStrength, 1.0, 0.0, 1.0);
+    // Nas bordas (cloudShape baixo) o detail erode mais
+    float erosion = mix(detailFBM, 1.0 - detailFBM, clamp(normAlt * 8.0, 0.0, 1.0));
+    float finalDensity = remap(cloudShape, erosion * uDetailStrength, 1.0, 0.0, 1.0);
 
     return max(0.0, finalDensity * uDensity);
 }
 
-// ── Light march (sombra das nuvens sobre si próprias) ─────────────────────────
-//
-//  A partir de um ponto p, lança uLightSteps amostras na direcção do sol.
-//  Acumula densidade → aplica Beer-Lambert → retorna energia luminosa restante.
+// ── Light march (amostragem uniforme + powder + ambient) ─────────────────────
 
-float lightMarch(vec3 p)
+float lightMarch(vec3 p, float normAlt)
 {
-    // Distância da amostra atual até sair da camada pelo topo (na direcção do sol)
-    float tTop  = rayPlane(p, uSunDir, uCloudTop);
-    if (tTop <= 0.0) return 1.0; // sol abaixo do horizonte
+    float tTop = rayPlane(p, uSunDir, uCloudTop);
+    if (tTop <= 0.0) return 1.0;
 
-    float stepSize = tTop / float(uLightSteps);
+    // Amostragem uniforme dentro da camada [p → topo]
+    float stepLen = tTop / float(uLightSteps);
     float totalDensity = 0.0;
 
-    vec3 pos = p;
-    for (int i = 0; i < uLightSteps; i++)
-    {
-        pos += uSunDir * stepSize;
+    for (int i = 0; i < uLightSteps; i++) {
+        vec3 pos = p + uSunDir * ((float(i) + 0.5) * stepLen);
         if (pos.y > uCloudTop || pos.y < uCloudBottom) break;
-        totalDensity += sampleCloudDensity(pos) * stepSize;
+        totalDensity += sampleCloudDensity(pos) * stepLen;
     }
 
-    // Beer-Lambert: transmittância ao longo do raio de luz
-    float beersLaw = exp(-totalDensity * uLightAbsorption);
+    // Beer-Lambert
+    float beer = exp(-totalDensity * uLightAbsorption);
 
-    // Powder / dark edge: efeito que escurece o interior das nuvens
-    // Simula multiple scattering sem custo adicional
+    // Powder/Dark-Edge: múltiplo espalhamento (borda escura na base)
     float powder = 1.0 - exp(-totalDensity * uDarkEdgeFactor * 2.0);
-    powder = mix(1.0, powder, clamp(dot(-uSunDir, vec3(0,1,0)), 0.0, 1.0));
-
-    return max(beersLaw, beersLaw * powder * uDarkEdgeFactor);
+    float sunUp = clamp(dot(uSunDir, vec3(0,1,0)), 0.0, 1.0);
+    float powderBlend = mix(0.75, 0.15, sunUp);
+    return mix(beer, beer * powder, powderBlend);
 }
 
 // ── Ray march principal ───────────────────────────────────────────────────────
 
 void main()
 {
-    // ── 1. Reconstruir raio a partir do pixel UV ──────────────────────────
-    vec2 ndc  = vUV * 2.0 - 1.0;                   // [0,1] → [-1,1]
-    vec4 clip = vec4(ndc, -1.0, 1.0);               // clip space
-    vec4 eye  = uInvProj * clip;
+    // 1. Reconstruir raio
+    vec2 ndc = vUV * 2.0 - 1.0;
+    vec4 eye = uInvProj * vec4(ndc, -1.0, 1.0);
     eye = vec4(eye.xy, -1.0, 0.0);
-    vec3 rd   = normalize((uInvView * eye).xyz);    // direcção do raio (world space)
-    vec3 ro   = uCameraPos;                         // origem do raio
+    vec3 rd = normalize((uInvView * eye).xyz);
+    vec3 ro = uCameraPos;
 
-    // ── 2. Interseção com a camada de nuvens (duas esferas horizontais) ──
+    // 2. Intervalo de intersecção com a camada
     float tBottom = rayPlane(ro, rd, uCloudBottom);
     float tTop    = rayPlane(ro, rd, uCloudTop);
-
-    // Determinar intervalo [tStart, tEnd] onde o raio está dentro da camada
     float tStart, tEnd;
 
     if (ro.y < uCloudBottom) {
-        // Câmara abaixo da camada → entrar pelo fundo
         if (tBottom <= 0.0) { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
         tStart = tBottom;
         tEnd   = (tTop > 0.0) ? tTop : tStart + (uCloudTop - uCloudBottom) / max(abs(rd.y), 0.001);
     } else if (ro.y > uCloudTop) {
-        // Câmara acima da camada → entrar pelo topo
         if (tTop <= 0.0) { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
         tStart = tTop;
         tEnd   = (tBottom > 0.0) ? tBottom : tStart + (uCloudTop - uCloudBottom) / max(abs(rd.y), 0.001);
     } else {
-        // Câmara dentro da camada
         tStart = 0.0;
         float t1 = (tTop    > 0.0) ? tTop    : -1.0;
         float t2 = (tBottom > 0.0) ? tBottom : -1.0;
-        if      (t1 > 0.0 && t2 > 0.0) tEnd = min(t1, t2);
-        else if (t1 > 0.0)              tEnd = t1;
-        else if (t2 > 0.0)              tEnd = t2;
+        if      (t1>0.0 && t2>0.0) tEnd = min(t1,t2);
+        else if (t1>0.0)            tEnd = t1;
+        else if (t2>0.0)            tEnd = t2;
         else { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
     }
 
     tStart = max(tStart, 0.0);
-    tEnd   = min(tEnd,   uMaxRayDist);
+    tEnd   = min(tEnd, uMaxRayDist);
     if (tStart >= tEnd) { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
 
-    // ── 3. Ray march ──────────────────────────────────────────────────────
+    // 3. Setup do ray march
     float stepSize = (tEnd - tStart) / float(uPrimarySteps);
-
-    // Offset aleatório para reduzir banding (dithering)
-    // Usa posição do pixel como semente de hash simples
-    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    // IGN: padrão de baixa discrepância, muito menos artefactos que ruído branco
+    float jitter = ign(gl_FragCoord.xy + vec2(float(uFrameIndex) * 1.618034));
     float t = tStart + jitter * stepSize;
 
-    // Acumuladores
-    vec3  cloudColor      = vec3(0.0);
-    float transmittance   = 1.0;   // começa totalmente transparente
+    vec3  cloudColor    = vec3(0.0);
+    float transmittance = 1.0;
+    float cosTheta      = dot(rd, uSunDir);
+    float phase         = phaseFunction(cosTheta);
 
-    // Coseno do ângulo entre raio e direcção do sol (para phase function)
-    float cosTheta = dot(rd, uSunDir);
-    float phase    = phaseFunction(cosTheta);
-
+    // 4. Ray march
     for (int i = 0; i < uPrimarySteps; i++)
     {
         if (t > tEnd) break;
-        if (transmittance < 0.01) break; // early exit — nuvem já é opaca
+        if (transmittance < 0.005) break;
 
         vec3 pos = ro + rd * t;
 
-        // Só amostrar dentro da camada
         if (pos.y >= uCloudBottom && pos.y <= uCloudTop)
         {
             float density = sampleCloudDensity(pos);
 
-            if (density > 0.0)
+            if (density > 0.001)
             {
-                // Light march: quanta luz do sol chega a este ponto
-                float lightEnergy = lightMarch(pos);
+                float normAlt = remap(pos.y, uCloudBottom, uCloudTop, 0.0, 1.0);
 
-                // Energia luminosa neste ponto = luz × phase × intensidade
-                vec3 scatteredLight = uSunColor * uSunIntensity * lightEnergy * phase;
+                // Iluminação directa do sol
+                float lightEnergy = lightMarch(pos, normAlt);
+                vec3 sunLight = uSunColor * uSunIntensity * lightEnergy * phase;
 
-                // Transmittância deste segmento (Beer-Lambert)
+                // Luz ambiente (ilumina base com cor do céu)
+                float ambOcc  = remap(normAlt, 0.0, 0.5, 0.08, 1.0);
+                vec3 ambLight = mix(uSkyHorizon * 0.6, uSkyZenith, normAlt) * 0.20 * ambOcc;
+
+                vec3 totalLight = sunLight + ambLight;
+
+                // Beer-Lambert deste segmento + integral analítica de scattering
+                // (1 - segTransmit) dá o in-scattering correto sem divisão por σ_t
                 float segTransmit = exp(-density * uCloudAbsorption * stepSize);
-
-                // Integral de scattering: acumula cor ponderada pela transmittância
-                // usando integração de Euler:
-                //   color += transmittance × scatteredLight × (1 - segTransmit) / absorption
-                float absorption = max(density * uCloudAbsorption, 1e-5);
-                cloudColor += transmittance * scatteredLight * (1.0 - segTransmit) / absorption;
-
+                cloudColor += transmittance * totalLight * (1.0 - segTransmit);
                 transmittance *= segTransmit;
             }
         }
 
-        // Adaptar tamanho do passo: passos maiores onde há menos densidade
-        // (otimização: evita sobresampling em regiões vazias)
+        // Passo adaptativo: maior onde há menos potencial de densidade
+        // (fica mais curto dentro da camada, mais largo no vazio)
         t += stepSize;
     }
 
-    oCloudColor    = vec4(cloudColor, 1.0);
-    oTransmittance = transmittance;
+    // 5. Acumulação temporal — blend com frame anterior
+    vec4  prevColor   = texture(uPrevCloudColor, vUV);
+    float prevTransmit = texture(uPrevCloudAlpha, vUV).r;
+    vec4  currColor   = vec4(cloudColor, 1.0);
+
+    oCloudColor    = mix(prevColor,   currColor,           uTemporalBlend);
+    oTransmittance = mix(prevTransmit, transmittance,      uTemporalBlend);
 }

@@ -49,7 +49,7 @@ void CloudRenderer::render(const Camera& cam, float time, int width, int height)
     // Qualquer rotação ou translação significativa → blend alto (descarta história)
     // Em repouso → blend baixo (acumula qualidade ao longo de ~20 frames)
     float motion = posDelta * 0.0005f + rotDelta * 500.0f;
-    float temporalBlend = glm::clamp(0.06f + motion, 0.06f, 0.98f);
+    float temporalBlend = glm::clamp(0.10f + motion, 0.10f, 0.98f);
 
     int curr = currentBuf;
     int prev = 1 - currentBuf;

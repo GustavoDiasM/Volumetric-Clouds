@@ -175,13 +175,15 @@ void main()
         tStart = tTop;
         tEnd   = (tBottom > 0.0) ? tBottom : tStart + (uCloudTop - uCloudBottom) / max(abs(rd.y), 0.001);
     } else {
+        // Câmara dentro da camada — raios horizontais (rd.y≈0) nunca cruzam
+        // o topo nem a base, mas devem marchar na horizontal até maxDist
         tStart = 0.0;
         float t1 = (tTop    > 0.0) ? tTop    : -1.0;
         float t2 = (tBottom > 0.0) ? tBottom : -1.0;
-        if      (t1>0.0 && t2>0.0) tEnd = min(t1,t2);
-        else if (t1>0.0)            tEnd = t1;
-        else if (t2>0.0)            tEnd = t2;
-        else { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
+        if      (t1 > 0.0 && t2 > 0.0) tEnd = min(t1, t2);
+        else if (t1 > 0.0)              tEnd = t1;
+        else if (t2 > 0.0)              tEnd = t2;
+        else                            tEnd = uMaxRayDist; // raio horizontal
     }
 
     tStart = max(tStart, 0.0);
@@ -189,7 +191,10 @@ void main()
     if (tStart >= tEnd) { oCloudColor = vec4(0.0); oTransmittance = 1.0; return; }
 
     // 3. Setup do ray march
-    float stepSize = (tEnd - tStart) / float(uPrimarySteps);
+    // Limitar o step a 150 m evita sub-amostragem em ângulos rasantes
+    // (raios com grande tEnd-tStart teriam steps de 400-1000 m sem o cap)
+    float effectiveLen = min(tEnd - tStart, float(uPrimarySteps) * 150.0);
+    float stepSize = effectiveLen / float(uPrimarySteps);
     // IGN: padrão de baixa discrepância, muito menos artefactos que ruído branco
     float jitter = ign(gl_FragCoord.xy + vec2(float(uFrameIndex) * 1.618034));
     float t = tStart + jitter * stepSize;

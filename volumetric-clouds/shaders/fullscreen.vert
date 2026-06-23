@@ -1,4 +1,4 @@
-#version 430 core
+#version 420 core
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Vertex shader partilhado por todos os passes de fullscreen quad.

@@ -1,4 +1,4 @@
-#version 430 core
+#version 420 core
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  composite.frag — faz o composite das nuvens sobre o céu + tonemapping

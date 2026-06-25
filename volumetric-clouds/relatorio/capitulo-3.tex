@@ -1,0 +1,93 @@
+\chapter{Tecnologias e Ferramentas Utilizadas}
+\label{chap:tecno-ferra}
+
+\section{Introdução}
+\label{chap3:sec:intro}
+
+Este capítulo descreve as tecnologias selecionadas para a implementação do renderizador. A escolha privilegiou ferramentas maduras, bem documentadas e adequadas ao desenvolvimento de aplicações gráficas em ambiente académico. São apresentadas as linguagens de programação, a \ac{API} gráfica, as bibliotecas de suporte e o sistema de construção (\emph{build system}).
+
+A secção~\ref{chap3:sec:lang} aborda as linguagens utilizadas. A secção~\ref{chap3:sec:opengl} descreve a \ac{API} gráfica \ac{OpenGL} e o \ac{GLSL}. As secções~\ref{chap3:sec:glfw} a~\ref{chap3:sec:imgui} apresentam as bibliotecas auxiliares. Por fim, a secção~\ref{chap3:sec:cmake} descreve o sistema de construção.
+
+\section{C++17}
+\label{chap3:sec:lang}
+
+A aplicação foi escrita em C++ seguindo o standard C++17. O C++ é a linguagem de eleição em computação gráfica de alto desempenho pela sua combinação de controlo de baixo nível sobre a memória e \ac{GPU} com abstrações de alto nível como classes, templates e gestão automática de recursos (RAII). O C++17 introduz melhorias como \texttt{std::optional}, estruturas de ligação (\emph{structured bindings}) e garantias de \emph{copy elision} que foram usadas para tornar o código mais expressivo.
+
+\section{OpenGL 4.2 e GLSL 4.20}
+\label{chap3:sec:opengl}
+
+\ac{OpenGL}~\cite{opengl} é a \ac{API} gráfica de plataforma cruzada (\emph{cross-platform}) mais utilizada em ambiente académico e de produção. A versão 4.2 (\textit{Core Profile}) foi escolhida por ser a versão mais recente suportada pelo \emph{driver} Mesa em ambiente \ac{WSL}/Linux com aceleração D3D12 (AMD Radeon), garantindo compatibilidade sem perder funcionalidades necessárias.
+
+O \ac{GLSL} na versão 4.20 (\texttt{\#version 420 core}) é a linguagem de programação dos shaders. Os shaders implementados incluem:
+
+\begin{itemize}
+    \item \texttt{fullscreen.vert} --- vertex shader partilhado por todos os passes, que processa um quad de ecrã completo em \ac{NDC};
+    \item \texttt{clouds.frag} --- fragment shader principal, responsável pelo \emph{ray marching} volumétrico e acumulação temporal;
+    \item \texttt{composite.frag} --- shader de composição, que combina as nuvens com o céu procedural, aplica \emph{tonemapping} ACES e correção gamma.
+\end{itemize}
+
+\section{GLFW 3.4}
+\label{chap3:sec:glfw}
+
+\ac{GLFW}~\cite{glfw} é uma biblioteca de criação de janelas e gestão de input para \ac{OpenGL}. Abstrai as diferenças entre sistemas operativos (Windows, Linux, macOS) fornecendo uma \ac{API} uniforme para criação de contextos OpenGL, captura de eventos de teclado e rato, e sincronização com o monitor (\emph{vsync}). A versão 3.4 foi obtida automaticamente via CMake FetchContent durante a compilação.
+
+\section{GLAD v2}
+\label{chap3:sec:glad}
+
+\ac{GLAD}~\cite{glad} é um carregador de extensões \ac{OpenGL}. Uma vez que os pontos de entrada das funções OpenGL não estão disponíveis estaticamente no sistema operativo, é necessário um carregador que os resolva em tempo de execução. O GLAD v2 gera código de carregamento específico para a versão OpenGL 4.2 Core Profile, eliminando a necessidade de chamar \texttt{wglGetProcAddress}/\texttt{glXGetProcAddress} manualmente.
+
+\section{GLM 1.0.1}
+\label{chap3:sec:glm}
+
+\ac{GLM}~\cite{glm} é uma biblioteca \emph{header-only} de matemática vetorial e matricial modelada sobre o \ac{GLSL}. Fornece tipos como \texttt{glm::vec3}, \texttt{glm::mat4} e \texttt{glm::quat} com operações otimizadas. Os tipos GLM são diretamente compatíveis com as funções de upload de uniformes do OpenGL (\texttt{glUniform*}), eliminando conversões manuais. Operações como \texttt{glm::inverse()}, \texttt{glm::normalize()} e \texttt{glm::length()} são usadas extensivamente no código da câmara e do renderer.
+
+\section{Dear ImGui 1.90.9}
+\label{chap3:sec:imgui}
+
+Dear ImGui~\cite{imgui} é uma biblioteca de interface gráfica do utilizador de modo imediato (\emph{immediate mode GUI}). A cada fotograma, os elementos de UI (sliders, botões, caixas de cor) são declarados e desenhados sem estado persistente gerido pela biblioteca. O backend OpenGL 3 e o backend GLFW são incluídos diretamente nos ficheiros fonte da biblioteca, facilitando a integração. A UI do projeto é composta por painéis colapsáveis que controlam os parâmetros de nuvens, iluminação, vento e câmara descritos na Tabela~\ref{tab:params}.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|r|}
+\hline
+\textbf{Grupo} & \textbf{Parâmetro} & \textbf{Valor Padrão} \\
+\hline\hline
+\multirow{4}{*}{Nuvens} & Altitude mínima (m) & 1500 \\
+                        & Altitude máxima (m) & 4000 \\
+                        & Cobertura           & 0.50 \\
+                        & Densidade           & 0.25 \\
+\hline
+\multirow{3}{*}{Ruído}  & Escala shape        & 0.000065 \\
+                        & Escala detail       & 0.00035  \\
+                        & Força detail        & 0.20     \\
+\hline
+\multirow{2}{*}{Vento}  & Direção             & (1, 0, 0.1) \\
+                        & Velocidade (m/s)    & 40       \\
+\hline
+\multirow{5}{*}{Iluminação} & Direção do sol & (0.5, 0.8, 0.2) \\
+                             & Intensidade solar & 2.5 \\
+                             & Absorção (luz)    & 0.40 \\
+                             & Absorção (câmara) & 0.20 \\
+                             & Dark edge factor  & 0.60 \\
+\hline
+\multirow{3}{*}{HG Scattering} & g\textsubscript{+} (forward) & 0.85 \\
+                                & g\textsubscript{-} (backward) & $-$0.25 \\
+                                & Mistura           & 0.50 \\
+\hline
+\multirow{2}{*}{Ray March} & Passos primários & 64 \\
+                            & Passos de luz   & 8  \\
+\hline
+\end{tabular}
+\caption{Parâmetros configuráveis via ImGui e respetivos valores padrão.}
+\label{tab:params}
+\end{table}
+
+\section{CMake 3.20}
+\label{chap3:sec:cmake}
+
+O CMake é o sistema de construção utilizado. O ficheiro \texttt{CMakeLists.txt} declara todas as dependências via \texttt{FetchContent}, que as descarrega e compila automaticamente durante a configuração do projeto. Isto garante que a aplicação compila de forma determinista em qualquer máquina com C++17 e CMake 3.20, sem necessidade de instalar manualmente bibliotecas externas.
+
+\section{Conclusões}
+\label{chap3:sec:concs}
+
+O conjunto de tecnologias escolhido --- C++17, OpenGL 4.2, GLFW, GLAD, GLM e ImGui --- constitui uma pilha tecnológica madura e bem documentada para desenvolvimento de renderizadores em tempo real. A gestão automática de dependências via CMake FetchContent simplifica a configuração do ambiente de desenvolvimento, permitindo focar o esforço na implementação dos algoritmos de renderização descritos no capítulo seguinte.

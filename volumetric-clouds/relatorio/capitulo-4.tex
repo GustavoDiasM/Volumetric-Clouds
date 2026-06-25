@@ -1,0 +1,232 @@
+\chapter{Implementação}
+\label{chap:imp-test}
+
+\section{Introdução}
+\label{chap4:sec:intro}
+
+Este capítulo descreve em detalhe a implementação do renderizador de nuvens volumétricas. A aplicação é composta por cinco módulos principais: \texttt{Application} (ciclo de vida da janela e UI), \texttt{Camera} (câmara FPS livre), \texttt{NoiseGenerator} (geração das texturas 3D de ruído), \texttt{CloudRenderer} (gestão do pipeline de renderização) e os shaders GLSL (\texttt{clouds.frag} e \texttt{composite.frag}).
+
+A secção~\ref{chap4:sec:arq} descreve a arquitetura geral. A secção~\ref{chap4:sec:noise} detalha a geração de ruído. A secção~\ref{chap4:sec:pipeline} explica o pipeline de renderização a dois passes. A secção~\ref{chap4:sec:ilum} aborda o modelo de iluminação. A secção~\ref{chap4:sec:taa} trata da acumulação temporal. A secção~\ref{chap4:sec:composite} descreve a composição final. Por fim, a secção~\ref{chap4:sec:camera} explica a câmara interativa.
+
+\section{Arquitetura Geral}
+\label{chap4:sec:arq}
+
+A aplicação segue um ciclo de renderização clássico, ilustrado na Tabela~\ref{tab:pipeline}. A cada fotograma são executados dois passes de renderização distintos: um passe de \emph{ray marching} que acumula a cor e a transmitância das nuvens para um \emph{framebuffer} intermédio, e um passe de composição que combina o resultado com o céu procedural e aplica \emph{tonemapping}.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|c|l|l|}
+\hline
+\textbf{Passe} & \textbf{Shader} & \textbf{Saída} \\
+\hline\hline
+1 & \texttt{clouds.frag}    & Cor das nuvens (RGBA16F) + Transmitância (R16F) em FBO \\
+\hline
+2 & \texttt{composite.frag} & Imagem final (RGBA8) no framebuffer padrão \\
+\hline
+\end{tabular}
+\caption{Passes de renderização por fotograma.}
+\label{tab:pipeline}
+\end{table}
+
+O passe 1 usa dois pares de \ac{FBO} em \emph{ping-pong}: enquanto um é escrito no fotograma atual, o outro (do fotograma anterior) é lido para a acumulação temporal. O módulo \texttt{CloudRenderer} gere esta alternância automaticamente com a variável \texttt{currentBuf}.
+
+\section{Geração de Ruído Procedural}
+\label{chap4:sec:noise}
+
+O módulo \texttt{NoiseGenerator} gera duas texturas 3D na \ac{CPU} durante a inicialização: a textura de forma (\emph{shape noise}) de 128$^3$ voxels, e a textura de detalhe (\emph{detail noise}) de 32$^3$ voxels. Ambas são codificadas em RGBA32F e carregadas para a \ac{GPU} com mipmapping trilinear.
+
+\subsection{Ruído de Perlin}
+\label{chap4:subsec:perlin}
+
+O ruído de Perlin é implementado com a tabela de permutação original de Ken Perlin~\cite{perlin1985}, com 256 entradas duplicadas para evitar operações de módulo no interior do loop. A função de interpolação é a curva suave de quinta ordem (\emph{smoothstep} quintico):
+
+\begin{equation}
+f(t) = 6t^5 - 15t^4 + 10t^3
+\label{eq:smoothstep}
+\end{equation}
+
+O \ac{FBM} é calculado como soma de três oitavas com amplitudes decrescentes:
+
+\begin{equation}
+\text{FBM}(x,y,z) = 0.500 \cdot P(4x,4y,4z) + 0.350 \cdot P(8x,8y,8z) + 0.150 \cdot P(16x,16y,16z)
+\label{eq:fbm}
+\end{equation}
+
+\noindent onde $P$ denota o ruído de Perlin normalizado para $[0,1]$.
+
+\subsection{Ruído de Worley}
+\label{chap4:subsec:worley}
+
+O ruído de Worley utiliza um hash de inteiros (XOR com constantes primas) para gerar pontos de célula deterministicamente, evitando o custo de um gerador de números aleatórios. A vizinhança 3$\times$3$\times$3 de células é percorrida para cada voxel, calculando a distância euclidiana ao ponto mais próximo. O resultado é invertido ($1 - d$) para que as células produzam picos em vez de vales, facilitando a composição com o Perlin.
+
+\subsection{Combinação Perlin-Worley e Canais de Textura}
+\label{chap4:subsec:shapetex}
+
+A textura de forma de 128$^3$ armazena em quatro canais:
+\begin{itemize}
+    \item \textbf{R}: Perlin-Worley --- combinação de FBM Perlin (60\%) com Worley invertido a freq.~4 (40\%), produzindo o perfil de ``couve-flor'' característico das nuvens cumulus;
+    \item \textbf{G}: Worley invertido, frequência 4;
+    \item \textbf{B}: Worley invertido, frequência 8;
+    \item \textbf{A}: Worley invertido, frequência 16.
+\end{itemize}
+
+A textura de detalhe de 32$^3$ armazena três oitavas de Worley (freq.~2, 4 e 8) nos canais R, G e B, usadas para erosão das bordas das nuvens.
+
+\section{Pipeline de Ray Marching}
+\label{chap4:sec:pipeline}
+
+O shader \texttt{clouds.frag} implementa o \emph{ray marching} volumétrico em cinco etapas por fragmento.
+
+\subsection{Reconstrução do Raio}
+\label{chap4:subsec:ray}
+
+Dado o fragmento com coordenadas UV $[0,1]^2$, o ponto em \ac{NDC} é calculado como $\mathbf{ndc} = 2\cdot\mathbf{uv} - 1$. O raio em espaço de câmara é obtido pela inversão da matriz de projeção, e transformado para espaço de mundo pela inversão da matriz de vista:
+
+\begin{equation}
+\mathbf{r}_d = \text{normalize}\left((M_{view}^{-1} \cdot M_{proj}^{-1} \cdot (\mathbf{ndc}, -1, 0))_{xyz}\right)
+\label{eq:raydir}
+\end{equation}
+
+\subsection{Interseção com a Camada de Nuvens}
+\label{chap4:subsec:intersec}
+
+A camada de nuvens é definida por dois planos horizontais: altitude mínima $h_{bot}$ e altitude máxima $h_{top}$. O intervalo de marcha $[t_{start}, t_{end}]$ é determinado em função da posição vertical da câmara:
+
+\begin{itemize}
+    \item \textbf{Câmara abaixo da camada} ($y < h_{bot}$): o raio entra no plano inferior e sai no plano superior;
+    \item \textbf{Câmara acima da camada} ($y > h_{top}$): o raio entra no plano superior;
+    \item \textbf{Câmara dentro da camada}: o ray march começa na posição da câmara ($t_{start} = 0$) e termina no primeiro plano intersectado; raios horizontais ($r_{dy} \approx 0$) marcham até à distância máxima configurável.
+\end{itemize}
+
+O passo de marcha é limitado a 150\,m independentemente do comprimento total do percurso, evitando subamostragem a ângulos rasantes.
+
+\subsection{Amostragem de Densidade}
+\label{chap4:subsec:densidade}
+
+Para cada posição $\mathbf{p} = \mathbf{r}_o + t \cdot \mathbf{r}_d$ ao longo do raio, a densidade das nuvens é calculada como:
+
+\begin{enumerate}
+    \item \textbf{Perfil de altitude}: gradiente suave que anula a densidade na base e no topo da camada, produzindo nuvens com base plana e topo arredondado:
+    \begin{equation}
+    h_{grad} = \text{remap}(h_{norm}, 0, 0.15, 0, 1) \cdot \text{remap}(h_{norm}, 0.85, 1, 1, 0)
+    \label{eq:hgrad}
+    \end{equation}
+    onde $h_{norm}$ é a altitude normalizada $[0,1]$ dentro da camada.
+
+    \item \textbf{Shape noise}: amostragem da textura 3D com deslocamento de vento, seguida de FBM em espaço de textura:
+    \begin{equation}
+    S_{FBM} = 0.625 R + 0.250 G + 0.100 B + 0.025 A
+    \label{eq:sfbm}
+    \end{equation}
+
+    \item \textbf{Máscara de cobertura}: remapeia $S_{FBM}$ de forma a que apenas valores acima de $(1 - \text{coverage})$ produzam nuvem, permitindo controlar a percentagem de céu encoberto.
+
+    \item \textbf{Erosão por detail noise}: o ruído de detalhe erode as bordas das nuvens de forma dependente da altitude, produzindo bordas mais suaves no topo e mais abruptas na base.
+\end{enumerate}
+
+A função de remapeamento \texttt{remap} é definida como:
+
+\begin{equation}
+\text{remap}(v, lo, hi, newLo, newHi) = newLo + (newHi - newLo) \cdot \text{clamp}\!\left(\frac{v - lo}{hi - lo}, 0, 1\right)
+\label{eq:remap}
+\end{equation}
+
+\subsection{Jitter por IGN}
+\label{chap4:subsec:ign}
+
+Para reduzir artefactos de amostragem, o ponto de partida de cada raio é perturbado por um valor pseudo-aleatório calculado com o padrão \ac{IGN} (\emph{Interleaved Gradient Noise}):
+
+\begin{equation}
+\text{IGN}(\mathbf{p}) = \text{fract}\!\left(52.98 \cdot \text{fract}\!\left(\mathbf{p} \cdot (0.0671, 0.0058)\right)\right)
+\label{eq:ign}
+\end{equation}
+
+O índice de fotograma multiplica o vetor de frequência, garantindo padrões diferentes em cada frame e convergência temporal com a \ac{TAA}.
+
+\section{Modelo de Iluminação}
+\label{chap4:sec:ilum}
+
+\subsection{Light March}
+\label{chap4:subsec:lightmarch}
+
+Para cada ponto $\mathbf{p}$ com densidade positiva, é realizado um segundo \emph{ray march} na direção do sol, da posição $\mathbf{p}$ até ao topo da camada. A densidade acumulada $D_{sun}$ determina a transmitância solar por Beer-Lambert (equação~\ref{eq:beer}) com coeficiente $\sigma_{light}$:
+
+\begin{equation}
+T_{sun} = e^{-D_{sun} \cdot \sigma_{light}}
+\label{eq:tsun}
+\end{equation}
+
+\subsection{Efeito Powder}
+\label{chap4:subsec:powderimpl}
+
+O efeito \emph{powder} é calculado como:
+
+\begin{equation}
+T_{powder} = 1 - e^{-D_{sun} \cdot k_{dark} \cdot 2}
+\label{eq:powder}
+\end{equation}
+
+e misturado com $T_{sun}$ em função do ângulo solar, introduzindo bordas escuras nas nuvens mais densas.
+
+\subsection{Função de Fase Dupla}
+\label{chap4:subsec:phasedouble}
+
+A função de fase aplicada combina dois lobos de Henyey-Greenstein (equação~\ref{eq:hg}):
+
+\begin{equation}
+p(\cos\theta) = (1 - \alpha)\, p_{HG}(\cos\theta,\, g^+) + \alpha\, p_{HG}(\cos\theta,\, g^-)
+\label{eq:dualphase}
+\end{equation}
+
+com valores padrão $g^+ = 0.85$ (dispersão frontal), $g^- = -0.25$ (retrodispersão) e $\alpha = 0.50$.
+
+\subsection{Integração de In-scattering}
+\label{chap4:subsec:inscatter}
+
+A contribuição luminosa de cada segmento de marcha é calculada pela integral analítica de Beer-Lambert, que evita divisão por $\sigma_t$ quando a densidade é nula:
+
+\begin{equation}
+\Delta L = T_{acum} \cdot L_{total} \cdot (1 - e^{-\rho \cdot \sigma_{cam} \cdot \Delta t})
+\label{eq:inscatter}
+\end{equation}
+
+onde $T_{acum}$ é a transmitância acumulada até ao ponto atual, $L_{total} = L_{sun} + L_{amb}$ e $\Delta t$ é o tamanho do passo. Este método é numericamente estável e não requer divisão por densidade.
+
+\section{Acumulação Temporal (TAA)}
+\label{chap4:sec:taa}
+
+A acumulação temporal é implementada com dois pares de \ac{FBO} em regime de \emph{ping-pong}. No final de cada fotograma, o resultado do passe de nuvens é misturado com o fotograma anterior:
+
+\begin{equation}
+C_n = (1 - \beta)\, C_{n-1} + \beta\, C_{atual}
+\label{eq:taa}
+\end{equation}
+
+O parâmetro $\beta$ (blend temporal) adapta-se automaticamente ao movimento da câmara: em repouso assume o valor mínimo de 0.10 (favorece a história, convergindo rapidamente), e aumenta até 0.98 quando há translação ou rotação significativa (descarta a história para evitar \emph{ghosting}):
+
+\begin{equation}
+\beta = \text{clamp}(0.10 + \Delta pos \cdot 0.0005 + \Delta front \cdot 500,\; 0.10,\; 0.98)
+\label{eq:taablend}
+\end{equation}
+
+\section{Composição e Tonemapping}
+\label{chap4:sec:composite}
+
+O shader \texttt{composite.frag} compõe o resultado final em quatro etapas:
+
+\begin{enumerate}
+    \item \textbf{Céu procedural}: gradiente zenith-horizonte com potência 0.4 sobre $r_{dy}$, mais névoa no horizonte;
+    \item \textbf{Disco solar}: \emph{smoothstep} sobre o cosseno do ângulo ao sol, com halo suave;
+    \item \textbf{Composição}: as nuvens (cor + transmitância) são compostas sobre o fundo: $C_{final} = C_{nuvens} + C_{fundo} \cdot T$, onde $T=1$ indica pixel totalmente transparente e $T=0$ pixel totalmente opaco;
+    \item \textbf{Tonemapping ACES} seguido de correção gamma ($\gamma = 2.2$) para conversão para sRGB.
+\end{enumerate}
+
+\section{Câmara FPS}
+\label{chap4:sec:camera}
+
+A câmara é do tipo FPS livre, inicializada a 2500\,m de altitude (dentro da camada de nuvens). O movimento é controlado por teclado (WASD + Espaço/Ctrl) e o ângulo pela captura do rato (botão direito mantido). A câmara expõe as matrizes de vista e projeção que são invertidas no shader para a reconstrução dos raios (equação~\ref{eq:raydir}).
+
+\section{Conclusões}
+\label{chap4:sec:concs}
+
+A implementação cobre todos os componentes enunciados nos objetivos: geração de ruído Perlin-Worley na \ac{CPU}, \emph{ray marching} volumétrico com \emph{jitter} IGN, modelo de iluminação Beer-Lambert com fase HG dupla e efeito \emph{powder}, acumulação temporal adaptativa e composição com \emph{tonemapping} ACES. O pipeline a dois passes mantém o código modular e facilita a manutenção e expansão futura.

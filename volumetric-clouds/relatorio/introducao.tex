@@ -1,0 +1,45 @@
+\chapter{Introdução}
+\label{chap:intro}
+
+\section{Enquadramento}
+\label{sec:enquad}
+
+A renderização de fenómenos atmosféricos em tempo real é um dos desafios mais exigentes da computação gráfica moderna. As nuvens, em particular, são estruturas volumétricas de geometria indefinida, iluminação complexa e dinâmica constante, tornando a sua simulação fiel especialmente difícil de obter a taxas de imagem interativas.
+
+Este projeto, desenvolvido no âmbito da unidade curricular de Computação Gráfica da \ac{UBI}, consiste na implementação de um renderizador de nuvens volumétricas em tempo real. A aplicação produz nuvens procedurais tridimensionais, iluminadas de forma fisicamente plausível, animadas pelo vento e controláveis interativamente pelo utilizador.
+
+A técnica central é o \emph{ray marching} volumétrico: para cada pixel do ecrã, um raio é lançado a partir da câmara e atravessa uma camada de nuvens definida por duas altitudes. Ao longo do percurso, amostras de ruído tridimensional determinam a densidade local, e um segundo conjunto de raios calcula a iluminação proveniente do sol, aplicando a lei de Beer-Lambert~\cite{max1995} e a função de fase de Henyey-Greenstein~\cite{hg1941}.
+
+\section{Motivação}
+\label{sec:mot}
+
+A renderização de nuvens em tempo real ganhou grande relevância na última década com a proliferação de simuladores de voo, videojogos de mundo aberto e motores de renderização em tempo real. Títulos como \textit{Horizon Zero Dawn} da Guerrilla Games~\cite{schneider2015} ou o \textit{Microsoft Flight Simulator} demonstraram que é possível obter nuvens de grande qualidade visual em hardware de consumo corrente, motivando a exploração académica destes algoritmos.
+
+A motivação para este projeto residiu precisamente na curiosidade de implementar, do zero e com controlo total sobre o pipeline, os algoritmos descritos na literatura técnica de computação gráfica, compreendendo em detalhe cada componente: geração de ruído, \emph{ray marching}, modelo de iluminação, acumulação temporal e composição final.
+
+\section{Objetivos}
+\label{sec:obj}
+
+Os objetivos definidos para este projeto foram:
+
+\begin{enumerate}
+    \item Implementar um gerador de ruído 3D procedural (Perlin, Worley e Perlin-Worley) para definir a forma e os detalhes das nuvens;
+    \item Desenvolver um shader de \emph{ray marching} que percorra uma camada atmosférica e calcule a densidade volumétrica das nuvens;
+    \item Incorporar um modelo de iluminação fisicamente plausível com dispersão de luz (\emph{scattering}), absorção (Beer-Lambert) e efeito \emph{powder};
+    \item Implementar acumulação temporal (\ac{TAA}) para reduzir o ruído inerente ao \emph{ray marching} estocástico;
+    \item Criar uma interface gráfica interativa (via ImGui) que permita ajustar em tempo real os parâmetros das nuvens, iluminação e câmara;
+    \item Aplicar \emph{tonemapping} \ac{ACES} e correção gamma para converter o resultado HDR em sRGB exibível.
+\end{enumerate}
+
+\section{Organização do Documento}
+\label{sec:organ}
+
+O presente documento encontra-se estruturado da seguinte forma:
+
+\begin{enumerate}
+    \item O primeiro capítulo --- \textbf{Introdução} --- apresenta o projeto, o seu enquadramento no contexto académico, a motivação para a escolha do tema, os objetivos traçados e a organização deste relatório.
+    \item O segundo capítulo --- \textbf{Estado da Arte} --- revê os principais trabalhos e técnicas existentes na área da renderização volumétrica de nuvens, situando este projeto no contexto da investigação atual.
+    \item O terceiro capítulo --- \textbf{Tecnologias e Ferramentas Utilizadas} --- descreve as bibliotecas, \emph{APIs} e linguagens que constituem a base tecnológica da implementação.
+    \item O quarto capítulo --- \textbf{Implementação} --- detalha as escolhas de arquitetura e os algoritmos implementados, desde a geração de ruído até à composição final com \emph{tonemapping}.
+    \item O quinto capítulo --- \textbf{Conclusões e Trabalho Futuro} --- sintetiza as conclusões do projeto e aponta extensões e melhorias que poderiam ser realizadas futuramente.
+\end{enumerate}

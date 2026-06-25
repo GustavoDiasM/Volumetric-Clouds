@@ -1,0 +1,38 @@
+\chapter{Conclusões e Trabalho Futuro}
+\label{chap:conc-trab-futuro}
+
+\section{Conclusões Principais}
+\label{sec:conc-princ}
+
+Este projeto demonstrou que é possível implementar um renderizador de nuvens volumétricas em tempo real de qualidade visual elevada, utilizando exclusivamente técnicas de domínio público e bibliotecas \emph{open source}, sobre uma base \ac{OpenGL} 4.2.
+
+Os objetivos definidos foram todos atingidos:
+
+\begin{itemize}
+    \item A geração de ruído Perlin-Worley na \ac{CPU} produziu texturas 3D com a estrutura característica das nuvens cumulus, validando a abordagem de Schneider~\cite{schneider2015} sem recorrer a compute shaders;
+    \item O \emph{ray marching} com \emph{jitter} IGN e passo máximo de 150\,m produziu imagens sem artefactos de amostragem visíveis a taxas de imagem interativas;
+    \item O modelo de iluminação Beer-Lambert com função de fase HG dupla e efeito \emph{powder} reproduz os fenómenos de retroiluminação (\emph{silver lining}) e as bordas escuras típicas das nuvens cumulus pesadas;
+    \item A acumulação temporal com blend adaptativo eliminou o ruído estocástico inerente ao \emph{ray marching} com apenas 64 passos primários, permitindo obter imagens suaves sem aumentar o custo por fotograma;
+    \item A interface ImGui permite explorar o espaço de parâmetros em tempo real, confirmando a influência de cada variável no resultado visual.
+\end{itemize}
+
+Do ponto de vista de aprendizagem, o projeto permitiu consolidar conhecimentos de \ac{GLSL}, álgebra linear aplicada a computação gráfica (matrizes de vista/projeção inversas, transformações de espaço), física de volumes participativos e técnicas de anti-aliasing temporal.
+
+\section{Trabalho Futuro}
+\label{sec:trab-futuro}
+
+Várias extensões poderiam melhorar significativamente a qualidade visual e o desempenho da aplicação:
+
+\begin{enumerate}
+    \item \textbf{Geração de ruído na GPU via compute shaders}: o ficheiro \texttt{noise\_shape.comp} e \texttt{noise\_detail.comp} existentes no repositório mas ainda não integrados poderiam mover a geração de ruído para a \ac{GPU}, reduzindo o tempo de arranque de vários segundos (atualmente dominado pelo cálculo na \ac{CPU}) para milissegundos;
+
+    \item \textbf{Renderização a meia resolução com upscale}: renderizar o passe de \emph{ray marching} a $\frac{1}{2}$ ou $\frac{1}{4}$ da resolução do ecrã e reconstruir a imagem final com \emph{checkerboard rendering} ou DLSS/FSR reduziria o custo por fotograma proporcionalmente;
+
+    \item \textbf{Dispersão atmosférica fisicamente baseada}: substituir o gradiente de céu procedural por uma solução da equação de Rayleigh-Mie (como o modelo de Hillaire~\cite{hillaire2020}) produziria cores de céu e pôr do sol fisicamente corretos, dependentes da posição do sol;
+
+    \item \textbf{Sistema de meteorologia dinâmica}: adicionar um mapa de cobertura 2D com variação temporal permitiria simular frentes meteorológicas, células de tempestade e transições entre tempo limpo e encoberto;
+
+    \item \textbf{Múltiplo espalhamento aproximado}: a implementação atual aproxima o múltiplo espalhamento apenas com o efeito \emph{powder}. Técnicas como a energia de múltiplos espalhamentos de Hillaire~\cite{hillaire2020} ou a aproximação de Wrenninge et al. produziriam nuvens com aspeto ainda mais realista em condições de luz difusa;
+
+    \item \textbf{Nímbos e cirros}: a camada atual modela apenas nuvens cumulus médias. Adicionar uma segunda camada de cirros finos a alta altitude (acima dos 6000\,m) e células de nevoeiro/nimbostratus enriqueceria a diversidade visual da cena.
+\end{enumerate}

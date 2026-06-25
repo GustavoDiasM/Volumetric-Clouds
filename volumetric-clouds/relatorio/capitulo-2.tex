@@ -1,0 +1,91 @@
+\chapter{Estado da Arte}
+\label{chap:estado-da-arte}
+
+\section{Introdução}
+\label{chap2:sec:intro}
+
+A renderização de nuvens é um problema estudado desde os primórdios da computação gráfica. Ao longo das décadas, as abordagens foram evoluindo de representações geométricas simplificadas para modelos físicos cada vez mais rigorosos. Este capítulo revê as contribuições mais relevantes, desde os modelos clássicos de volumes participativos até às técnicas modernas de \emph{ray marching} em tempo real, situando as escolhas de implementação deste projeto no contexto da investigação atual.
+
+A secção~\ref{chap2:sec:volume} introduz a teoria de renderização de meios participativos. A secção~\ref{chap2:sec:ruido} aborda os algoritmos de ruído procedural usados para modelar a forma das nuvens. A secção~\ref{chap2:sec:ilum} descreve os modelos de iluminação aplicáveis a volumes. A secção~\ref{chap2:sec:tempoReal} apresenta as técnicas modernas de renderização em tempo real. Por fim, a secção~\ref{chap2:sec:concs} resume as conclusões.
+
+\section{Renderização de Meios Participativos}
+\label{chap2:sec:volume}
+
+Um meio participativo é qualquer substância que interage com a luz ao longo do seu percurso, em contraste com superfícies opacas ou transparentes~\cite{max1995}. As nuvens são compostas por microgotículas de água que absorvem, emitem e dispersam a luz --- um fenómeno descrito pela equação de transferência radiativa (\emph{Radiative Transfer Equation}, RTE):
+
+\begin{equation}
+\frac{dL}{ds} = -(\sigma_a + \sigma_s)\,L + \sigma_a\,L_e + \sigma_s \int_{4\pi} p(\omega, \omega')\,L(\omega')\,d\omega'
+\label{eq:rte}
+\end{equation}
+
+\noindent onde $L$ é a radiância, $\sigma_a$ é o coeficiente de absorção, $\sigma_s$ o de dispersão, $L_e$ a emissão, e $p(\omega, \omega')$ a função de fase que descreve como a luz é redistribuída entre as direções $\omega'$ e $\omega$~\cite{max1995}.
+
+Na prática, a solução analítica da equação~(\ref{eq:rte}) é intratável. As implementações em tempo real recorrem a simplificações: extinção única (sem dispersão múltipla explícita), lei de Beer-Lambert para modelar a transmitância, e uma função de fase analítica para o termo de dispersão simples.
+
+A transmitância ao longo de um segmento de comprimento $d$ com densidade $\rho$ é dada pela lei de Beer-Lambert:
+
+\begin{equation}
+T(d) = e^{-\sigma_a \cdot \rho \cdot d}
+\label{eq:beer}
+\end{equation}
+
+\section{Ruído Procedural para Modelação de Nuvens}
+\label{chap2:sec:ruido}
+
+\subsection{Ruído de Perlin}
+\label{chap2:subsec:perlin}
+
+Ken Perlin introduziu em 1985 o algoritmo de ruído gradiente que viria a ter o seu nome~\cite{perlin1985}. O ruído de Perlin é contínuo, tem frequência fundamental bem definida, e a sua aparência orgânica e natural resulta da interpolação suave entre gradientes aleatórios numa grelha. Através da técnica de \emph{Fractional Brownian Motion} (\ac{FBM}) --- soma de oitavas com frequência crescente e amplitude decrescente --- obtém-se um ruído com detalhes a várias escalas, adequado para modelar estruturas naturais como nuvens, terreno e fumo.
+
+\subsection{Ruído de Worley}
+\label{chap2:subsec:worley}
+
+Steven Worley propôs em 1996 um modelo de ruído baseado em distâncias a pontos de células~\cite{worley1996}. O espaço é dividido numa grelha e cada célula contém um ponto aleatório; o valor em qualquer posição é a distância ao ponto mais próximo. Este ruído, também designado \emph{cellular noise} ou \emph{Voronoi noise}, produz padrões semelhantes a bolhas ou células, ideais para modelar a estrutura interior esponjosa das nuvens cumulus.
+
+\subsection{Combinação Perlin-Worley}
+\label{chap2:subsec:pw}
+
+Andrew Schneider, na sua palestra técnica sobre \textit{Horizon Zero Dawn}~\cite{schneider2015}, popularizou a combinação dos dois ruídos. O ruído \emph{Perlin-Worley} combina o perfil de larga escala do Perlin (FBM) com a estrutura celular do Worley, produzindo formas de nuvem com aspeto de ``couve-flor'' característico dos cumulus reais. A textura 3D de forma (\emph{shape noise}) de 128$^3$ é codificada em 4 canais: o canal R contém o Perlin-Worley, e os canais G, B e A contêm Worley a frequências crescentes para enriquecer o FBM em espaço de textura.
+
+\section{Modelos de Iluminação Volumétrica}
+\label{chap2:sec:ilum}
+
+\subsection{Função de Fase de Henyey-Greenstein}
+\label{chap2:subsec:hg}
+
+Henyey e Greenstein propuseram em 1941 uma função analítica para descrever a dispersão de luz em meios participativos~\cite{hg1941}:
+
+\begin{equation}
+p_{HG}(\cos\theta, g) = \frac{1-g^2}{4\pi \left(1 + g^2 - 2g\cos\theta\right)^{3/2}}
+\label{eq:hg}
+\end{equation}
+
+\noindent onde $\theta$ é o ângulo entre a direção de incidência e a direção de saída, e $g \in (-1, 1)$ é o parâmetro de assimetria. Para $g > 0$ a dispersão é predominantemente para a frente (\emph{forward scattering}), criando o halo luminoso visível nas nuvens retroiluminadas pelo sol. Para $g < 0$ predomina a retrodispersão. Em renderização de nuvens, é comum combinar dois lobos (um para a frente e outro para trás) numa função de fase dupla, aproximando o fenómeno \emph{silver lining}.
+
+\subsection{Efeito Powder}
+\label{chap2:subsec:powder}
+
+O efeito \emph{powder} (ou \emph{dark-edge}), também descrito por Schneider~\cite{schneider2015}, é uma aproximação ao múltiplo espalhamento que produz as bordas escuras visíveis na base das nuvens cumulus. É obtido modulando a transmitância calculada por Beer-Lambert com um fator adicional que depende da densidade acumulada ao longo do raio de luz, tornando as zonas de maior densidade aparentemente mais escuras quando vistas de determinados ângulos.
+
+\section{Renderização em Tempo Real}
+\label{chap2:sec:tempoReal}
+
+\subsection{Ray Marching Volumétrico}
+\label{chap2:subsec:rm}
+
+O \emph{ray marching} é uma técnica de renderização que percorre um raio em passos discretos, amostrando a função de densidade ao longo do percurso~\cite{schneider2015}. A acumulação do resultado é feita através da integração numérica de Riemann da equação de transferência radiativa simplificada. O principal desafio é o compromisso entre qualidade e desempenho: passos demasiado grandes produzem artefactos, enquanto passos pequenos tornam a renderização demasiado lenta para uso em tempo real.
+
+\subsection{Acumulação Temporal}
+\label{chap2:subsec:taa}
+
+A \ac{TAA} é uma técnica que distribui o custo computacional de uma imagem por múltiplos fotogramas consecutivos~\cite{karis2014}. No contexto de \emph{ray marching}, o \emph{jitter} introduzido no ponto de partida de cada raio (usando o padrão \ac{IGN}) garante que diferentes regiões do volume são amostradas em fotogramas distintos. A mistura (\emph{blend}) com o fotograma anterior acumula a informação ao longo do tempo, convergindo para uma imagem mais suave sem custo adicional por fotograma. O desafio reside na gestão de \emph{ghosting} quando a câmara se move: é necessário aumentar o peso do fotograma atual em caso de movimento.
+
+\subsection{Tonemapping ACES}
+\label{chap2:subsec:aces}
+
+Os valores de radiância calculados durante o \emph{ray marching} são lineares e de intervalo alargado (\ac{HDR}). Para exibição num monitor sRGB é necessário comprimir este intervalo dinâmico. O \emph{tonemapping} \ac{ACES} (\textit{Academy Color Encoding System})~\cite{narkowicz2016} aplica uma curva S que preserva detalhes tanto nas zonas claras como nas escuras, tornando a imagem final mais equilibrada e esteticamente agradável.
+
+\section{Conclusões}
+\label{chap2:sec:concs}
+
+A literatura existente estabelece claramente os componentes necessários para uma implementação eficiente de nuvens volumétricas em tempo real: ruído Perlin-Worley para a modelação de forma, \emph{ray marching} com \emph{jitter} para amostragem estocástica, função de fase HG dupla para iluminação realista, e acumulação temporal para convergência da imagem. Este projeto adota estas técnicas, implementando-as sobre uma base \ac{OpenGL}/GLSL, conforme descrito no Capítulo~\ref{chap:imp-test}.

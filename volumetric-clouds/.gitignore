@@ -4,3 +4,15 @@ build/
 *.so
 .cache/
 compile_commands.json
+imgui.ini
+relatorio/*.aux
+relatorio/*.log
+relatorio/*.out
+relatorio/*.toc
+relatorio/*.lof
+relatorio/*.lot
+relatorio/*.bbl
+relatorio/*.blg
+relatorio/*.synctex.gz
+relatorio/*.fls
+relatorio/*.fdb_latexmk
